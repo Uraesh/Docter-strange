@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8" />
+    <title>Hand Magic - Complete Powers</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        .input_video { position: absolute; width: 100%; height: 100%; object-fit: cover; opacity: 0; transform: scaleX(-1); }
+        canvas { position: absolute; width: 100%; height: 100%; transform: scaleX(-1); }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ff8800; font-family: monospace; }
+    </style>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+</head>
+<body>
+
+<div id="loading">Chargement magie...<br>Autorisez la caméra</div>
+<div id="container">
+    <video class="input_video"></video>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// --------------------------------------------------
+// VARIABLES GÉNÉRALES
+// --------------------------------------------------
+let handPosition = new THREE.Vector3();
+let handVelocity = new THREE.Vector3();
+let lastHandPos = new THREE.Vector3();
+let handDetected = false;
+let isFist = false;
+let isPointing = false;
+let magicIntegrity = 0;
+
+// --------------------------------------------------
+// CONFIG THREE.JS
+// --------------------------------------------------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.z = 10;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.getElementById('container').appendChild(renderer.domElement);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 2, 0.5, 0.9);
+composer.addPass(bloomPass);
+
+// --------------------------------------------------
+// CERCLE MAGIQUE (déjà présent)
+// --------------------------------------------------
+const magicGroup = new THREE.Group();
+scene.add(magicGroup);
+
+function buildRune(text, size) {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1024;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(512, 512);
+    ctx.font = 'bold 80px monospace';
+    ctx.fillStyle = 'white';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const step = (Math.PI * 2) / text.length;
+    for (let i = 0; i < text.length; i++) {
+        ctx.save();
+        ctx.rotate(i * step);
+        ctx.translate(0, -400);
+        ctx.fillText(text[i], 0, 0);
+        ctx.restore();
+    }
+    return new THREE.CanvasTexture(canvas);
+}
+
+magicGroup.add(new THREE.Mesh(
+    new THREE.PlaneGeometry(6, 6),
+    new THREE.MeshBasicMaterial({
+        map: buildRune("ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789", 6),
+        color: 0xffaa00,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    })
+));
+
+// --------------------------------------------------
+// EFFETS : RAYON ASTRAL, PARTICULES, PORTAIL, PUSH
+// --------------------------------------------------
+
+// ---- 1. RAYON ASTRAL ----
+const rays = [];
+function spawnRay() {
+    const geo = new THREE.CylinderGeometry(0.1, 0.1, 4, 16);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
+    const ray = new THREE.Mesh(geo, mat);
+    ray.position.copy(handPosition);
+    ray.rotation.x = Math.PI / 2;
+    scene.add(ray);
+    rays.push(ray);
+}
+
+// ---- 2. EXPLOSION DE PARTICULES ----
+const particles = [];
+function spawnExplosion() {
+    for (let i = 0; i < 30; i++) {
+        const p = new THREE.Mesh(
+            new THREE.SphereGeometry(0.1, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xff4400 })
+        );
+        p.position.copy(handPosition);
+        p.velocity = new THREE.Vector3(
+            (Math.random() - 0.5) * 4,
+            (Math.random() - 0.5) * 4,
+            (Math.random() - 0.5) * 4
+        );
+        particles.push(p);
+        scene.add(p);
+    }
+}
+
+// ---- 3. PORTAIL MAGIQUE ----
+let portal = null;
+function spawnPortal() {
+    if (portal) return;
+    portal = new THREE.Mesh(
+        new THREE.RingGeometry(2.5, 3, 32),
+        new THREE.MeshBasicMaterial({ color: 0x00ff66, transparent: true, opacity: 0.8 })
+    );
+    portal.position.copy(handPosition);
+    scene.add(portal);
+}
+
+// ---- 4. PUSH TELEKINETIQUE ----
+let pushForce = 0;
+function triggerPush() {
+    pushForce = 1.5; // onde rapide
+}
+
+// --------------------------------------------------
+// MEDIAPIPE
+// --------------------------------------------------
+const video = document.querySelector('.input_video');
+const loading = document.getElementById('loading');
+
+function onResults(results) {
+    loading.style.display = 'none';
+
+    if (!results.multiHandLandmarks?.length) {
+        handDetected = false;
+        return;
+    }
+
+    handDetected = true;
+    const lm = results.multiHandLandmarks[0];
+
+    // Position de la main (landmark 9)
+    const palm = lm[9];
+    const x = (palm.x - 0.5) * 18;
+    const y = -(palm.y - 0.5) * 14;
+
+    handPosition.set(x, y, 0);
+
+    // Vitesse
+    handVelocity.copy(handPosition).sub(lastHandPos);
+    lastHandPos.copy(handPosition);
+
+    // Détection poing
+    const dIndex = Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y);
+    const dMiddle = Math.hypot(lm[12].x - lm[0].x, lm[12].y - lm[0].y);
+    isFist = (dIndex + dMiddle) / 2 < 0.25;
+
+    // Détection geste "pistolet" pour rayon astral
+    const dThumb = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+    isPointing = dThumb > 0.1 && !isFist;
+}
+
+const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+hands.onResults(onResults);
+
+const cam = new Camera(video, {
+    onFrame: async () => { await hands.send({ image: video }); },
+    width: 1280,
+    height: 720,
+});
+cam.start();
+
+// --------------------------------------------------
+// BOUCLE PRINCIPALE
+// --------------------------------------------------
+function animate() {
+    requestAnimationFrame(animate);
+
+    // Cercle magique : construit si main ouverte, détruit si poing
+    const targetIntegrity = handDetected && !isFist ? 1 : 0;
+    magicIntegrity += (targetIntegrity - magicIntegrity) * 0.1;
+    magicGroup.scale.setScalar(magicIntegrity);
+    magicGroup.position.lerp(handPosition, 0.2);
+
+    // --- RAYON ASTRAL ---
+    if (isPointing) spawnRay();
+    rays.forEach(r => {
+        r.position.z -= 0.6;
+    });
+
+    // --- EXPLOSION PARTICULES (poing + mouvement rapide) ---
+    if (isFist && handVelocity.length() > 0.6) spawnExplosion();
+    particles.forEach(p => {
+        p.position.add(p.velocity.multiplyScalar(0.1));
+        p.material.opacity *= 0.96;
+    });
+
+    // --- PORTAIL (faire tourner la main rapidement) ---
+    if (handVelocity.length() > 1 && !portal) spawnPortal();
+    if (portal) portal.rotation.z += 0.03;
+
+    // --- PUSH (main ouverte + mouvement avant) ---
+    if (!isFist && handVelocity.y > 0.7) triggerPush();
+    if (pushForce > 0) pushForce -= 0.05;
+
+    composer.render();
+}
+
+animate();
+
+// Resize
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+</script>
+</body>
+</html>
