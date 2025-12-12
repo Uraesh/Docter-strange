@@ -1,14 +1,29 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-    <meta charset="UTF-8" />
-    <title>Hand Magic - Complete Powers</title>
+    <meta charset="UTF-8">
+    <title>Dr Strange Hand Control - Three.js + MediaPipe</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #000; }
+        body { margin: 0; overflow: hidden; background-color: #000; }
         #container { position: relative; width: 100vw; height: 100vh; }
-        .input_video { position: absolute; width: 100%; height: 100%; object-fit: cover; opacity: 0; transform: scaleX(-1); }
-        canvas { position: absolute; width: 100%; height: 100%; transform: scaleX(-1); }
-        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ff8800; font-family: monospace; }
+        
+        /* Vidéo webcam (cachée ou visible en petit pour debug, ici cachée pour l'immersion) */
+        .input_video {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: cover; transform: scaleX(-1); opacity: 0; pointer-events: none;
+        }
+
+        /* Canvas Three.js */
+        canvas {
+            display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            transform: scaleX(-1); /* Miroir pour correspondre aux mouvements de la main */
+        }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #ffaa00; font-family: 'Courier New', monospace; font-size: 1.5em; 
+            text-align: center; pointer-events: none; z-index: 10;
+        }
     </style>
 
     <script type="importmap">
@@ -20,239 +35,223 @@
         }
     </script>
 
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 </head>
 <body>
 
-<div id="loading">Chargement magie...<br>Autorisez la caméra</div>
-<div id="container">
-    <video class="input_video"></video>
-</div>
+    <div id="loading">Initialisation de la Magie...<br><span style="font-size:0.6em">Autorisez la caméra</span></div>
+    
+    <div id="container">
+        <video class="input_video"></video>
+        </div>
 
-<script type="module">
-import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-// --------------------------------------------------
-// VARIABLES GÉNÉRALES
-// --------------------------------------------------
-let handPosition = new THREE.Vector3();
-let handVelocity = new THREE.Vector3();
-let lastHandPos = new THREE.Vector3();
-let handDetected = false;
-let isFist = false;
-let isPointing = false;
-let magicIntegrity = 0;
+        // --- VARIABLES GLOBALES DE CONTRÔLE ---
+        let handPosition = new THREE.Vector3(0, 0, 0); // Position cible
+        let handRotation = new THREE.Quaternion(); // Rotation cible
+        let handDetected = false;
+        let isFist = false; // État destruction
+        
+        // État du cercle (0 = détruit, 1 = complet)
+        let magicIntegrity = 0; 
 
-// --------------------------------------------------
-// CONFIG THREE.JS
-// --------------------------------------------------
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x000000);
+        // --- PARTIE 1 : THREE.JS (Le Visuel) ---
+        const scene = new THREE.Scene();
+        // Pas de fond noir total, on laisse transparent pour voir la vidéo si besoin, 
+        // ou noir pour immersion totale. Ici noir.
+        scene.background = new THREE.Color(0x050505); 
 
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
-camera.position.z = 10;
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.z = 10;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(window.devicePixelRatio);
-document.getElementById('container').appendChild(renderer.domElement);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.toneMapping = THREE.ReinhardToneMapping;
+        document.getElementById('container').appendChild(renderer.domElement);
 
-const composer = new EffectComposer(renderer);
-composer.addPass(new RenderPass(scene, camera));
+        // Post-Processing (Bloom)
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0;
+        bloomPass.strength = 2.5; 
+        bloomPass.radius = 0.5;
 
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 2, 0.5, 0.9);
-composer.addPass(bloomPass);
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
 
-// --------------------------------------------------
-// CERCLE MAGIQUE (déjà présent)
-// --------------------------------------------------
-const magicGroup = new THREE.Group();
-scene.add(magicGroup);
+        // --- GÉNÉRATION TEXTURES (Copié du code précédent) ---
+        function createRuneTexture(textString) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1024; canvas.height = 1024;
+            const ctx = canvas.getContext('2d');
+            ctx.translate(512, 512);
+            ctx.font = 'bold 80px Courier New';
+            ctx.fillStyle = 'white';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const step = (Math.PI * 2) / textString.length;
+            for (let i = 0; i < textString.length; i++) {
+                ctx.save();
+                ctx.rotate(i * step);
+                ctx.translate(0, -380);
+                ctx.fillText(textString[i], 0, 0);
+                ctx.restore();
+            }
+            ctx.beginPath(); ctx.arc(0, 0, 430, 0, Math.PI * 2);
+            ctx.lineWidth = 10; ctx.strokeStyle = 'white'; ctx.stroke();
+            return new THREE.CanvasTexture(canvas);
+        }
 
-function buildRune(text, size) {
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = 1024;
-    const ctx = canvas.getContext('2d');
-    ctx.translate(512, 512);
-    ctx.font = 'bold 80px monospace';
-    ctx.fillStyle = 'white';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const step = (Math.PI * 2) / text.length;
-    for (let i = 0; i < text.length; i++) {
-        ctx.save();
-        ctx.rotate(i * step);
-        ctx.translate(0, -400);
-        ctx.fillText(text[i], 0, 0);
-        ctx.restore();
-    }
-    return new THREE.CanvasTexture(canvas);
-}
+        function createSquareTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.strokeStyle = 'white'; ctx.lineWidth = 15;
+            ctx.strokeRect(100, 100, 312, 312);
+            ctx.lineWidth = 5; ctx.beginPath();
+            ctx.moveTo(100, 100); ctx.lineTo(412, 412);
+            ctx.moveTo(412, 100); ctx.lineTo(100, 412);
+            ctx.stroke();
+            return new THREE.CanvasTexture(canvas);
+        }
 
-magicGroup.add(new THREE.Mesh(
-    new THREE.PlaneGeometry(6, 6),
-    new THREE.MeshBasicMaterial({
-        map: buildRune("ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789", 6),
-        color: 0xffaa00,
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false
-    })
-));
+        // --- ASSEMBLAGE DU CERCLE ---
+        const magicGroup = new THREE.Group();
+        scene.add(magicGroup);
+        const materialBase = { transparent: true, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false };
 
-// --------------------------------------------------
-// EFFETS : RAYON ASTRAL, PARTICULES, PORTAIL, PUSH
-// --------------------------------------------------
+        const runeRing = new THREE.Mesh(new THREE.PlaneGeometry(6, 6), new THREE.MeshBasicMaterial({ ...materialBase, map: createRuneTexture("ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789"), color: 0xffaa00 }));
+        magicGroup.add(runeRing);
 
-// ---- 1. RAYON ASTRAL ----
-const rays = [];
-function spawnRay() {
-    const geo = new THREE.CylinderGeometry(0.1, 0.1, 4, 16);
-    const mat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
-    const ray = new THREE.Mesh(geo, mat);
-    ray.position.copy(handPosition);
-    ray.rotation.x = Math.PI / 2;
-    scene.add(ray);
-    rays.push(ray);
-}
+        const runeRing2 = new THREE.Mesh(new THREE.PlaneGeometry(4, 4), new THREE.MeshBasicMaterial({ ...materialBase, map: createRuneTexture("⚡ ★ ☀ ☂ ☁ ☾ ☝ ☠ ☮ ☯ ☢ ☣"), color: 0xff4400 }));
+        magicGroup.add(runeRing2);
 
-// ---- 2. EXPLOSION DE PARTICULES ----
-const particles = [];
-function spawnExplosion() {
-    for (let i = 0; i < 30; i++) {
-        const p = new THREE.Mesh(
-            new THREE.SphereGeometry(0.1, 8, 8),
-            new THREE.MeshBasicMaterial({ color: 0xff4400 })
-        );
-        p.position.copy(handPosition);
-        p.velocity = new THREE.Vector3(
-            (Math.random() - 0.5) * 4,
-            (Math.random() - 0.5) * 4,
-            (Math.random() - 0.5) * 4
-        );
-        particles.push(p);
-        scene.add(p);
-    }
-}
+        const squareRing = new THREE.Mesh(new THREE.PlaneGeometry(3.5, 3.5), new THREE.MeshBasicMaterial({ ...materialBase, map: createSquareTexture(), color: 0xffcc00 }));
+        magicGroup.add(squareRing);
 
-// ---- 3. PORTAIL MAGIQUE ----
-let portal = null;
-function spawnPortal() {
-    if (portal) return;
-    portal = new THREE.Mesh(
-        new THREE.RingGeometry(2.5, 3, 32),
-        new THREE.MeshBasicMaterial({ color: 0x00ff66, transparent: true, opacity: 0.8 })
-    );
-    portal.position.copy(handPosition);
-    scene.add(portal);
-}
+        // --- PARTIE 2 : MEDIAPIPE (La Vision) ---
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const loadingDiv = document.getElementById('loading');
 
-// ---- 4. PUSH TELEKINETIQUE ----
-let pushForce = 0;
-function triggerPush() {
-    pushForce = 1.5; // onde rapide
-}
+        function onResults(results) {
+            loadingDiv.style.display = 'none';
 
-// --------------------------------------------------
-// MEDIAPIPE
-// --------------------------------------------------
-const video = document.querySelector('.input_video');
-const loading = document.getElementById('loading');
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                handDetected = true;
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // 1. POSITION : On utilise le point 9 (base du majeur) comme centre de la main
+                const palmCenter = landmarks[9];
+                
+                // Conversion coordonnées normalisées (0->1) vers coordonnées Three.js (-w -> +w)
+                // On utilise un champ de vision approximatif à Z=0
+                const x = (palmCenter.x - 0.5) * 18; // Multiplicateur pour couvrir l'écran
+                const y = -(palmCenter.y - 0.5) * 14;
+                
+                // Lissage simple
+                handPosition.set(x, y, 0);
 
-function onResults(results) {
-    loading.style.display = 'none';
+                // 2. DÉTECTION POING FERMÉ vs MAIN OUVERTE
+                // On compare la distance du bout des doigts (Index 8) par rapport au poignet (0)
+                const wrist = landmarks[0];
+                const indexTip = landmarks[8];
+                const middleTip = landmarks[12];
+                const ringTip = landmarks[16];
+                
+                // Distance simple au carré pour éviter la racine carrée
+                const dIndex = Math.hypot(indexTip.x - wrist.x, indexTip.y - wrist.y);
+                const dMiddle = Math.hypot(middleTip.x - wrist.x, middleTip.y - wrist.y);
+                const dRing = Math.hypot(ringTip.x - wrist.x, ringTip.y - wrist.y);
+                
+                const avgDist = (dIndex + dMiddle + dRing) / 3;
 
-    if (!results.multiHandLandmarks?.length) {
-        handDetected = false;
-        return;
-    }
+                // Seuil empirique : si les doigts sont proches du poignet, c'est un poing
+                isFist = avgDist < 0.25; 
 
-    handDetected = true;
-    const lm = results.multiHandLandmarks[0];
+            } else {
+                handDetected = false;
+            }
+        }
 
-    // Position de la main (landmark 9)
-    const palm = lm[9];
-    const x = (palm.x - 0.5) * 18;
-    const y = -(palm.y - 0.5) * 14;
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+        hands.onResults(onResults);
 
-    handPosition.set(x, y, 0);
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 1280, height: 720
+        });
+        cameraUtils.start();
 
-    // Vitesse
-    handVelocity.copy(handPosition).sub(lastHandPos);
-    lastHandPos.copy(handPosition);
+        // --- PARTIE 3 : ANIMATION ET LOGIQUE DE JEU ---
+        const clock = new THREE.Clock();
 
-    // Détection poing
-    const dIndex = Math.hypot(lm[8].x - lm[0].x, lm[8].y - lm[0].y);
-    const dMiddle = Math.hypot(lm[12].x - lm[0].x, lm[12].y - lm[0].y);
-    isFist = (dIndex + dMiddle) / 2 < 0.25;
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
 
-    // Détection geste "pistolet" pour rayon astral
-    const dThumb = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
-    isPointing = dThumb > 0.1 && !isFist;
-}
+            // 1. Gestion de l'intégrité (Construction / Destruction)
+            // Si main détectée et pas poing -> Construire (tendre vers 1)
+            // Si poing ou pas de main -> Détruire (tendre vers 0)
+            const targetIntegrity = (handDetected && !isFist) ? 1.0 : 0.0;
+            
+            // Interpolation douce (Lerp) pour l'effet de construction
+            magicIntegrity += (targetIntegrity - magicIntegrity) * 5 * dt;
 
-const hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
-hands.setOptions({ maxNumHands: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
-hands.onResults(onResults);
+            // 2. Mouvement du Groupe
+            if (handDetected) {
+                // Suivre la main (avec un peu de retard pour la fluidité)
+                magicGroup.position.lerp(handPosition, 0.1);
+                
+                // Inclinaison subtile basée sur la position (effet de perspective)
+                magicGroup.rotation.x = THREE.MathUtils.lerp(magicGroup.rotation.x, handPosition.y * 0.1, 0.1);
+                magicGroup.rotation.y = THREE.MathUtils.lerp(magicGroup.rotation.y, handPosition.x * 0.1, 0.1);
+            }
 
-const cam = new Camera(video, {
-    onFrame: async () => { await hands.send({ image: video }); },
-    width: 1280,
-    height: 720,
-});
-cam.start();
+            // 3. Animation visuelle basée sur l'intégrité
+            
+            // Échelle : De 0 à 1.2 (léger rebond)
+            const scale = magicIntegrity * (1 + Math.sin(elapsedTime * 10) * 0.02); 
+            magicGroup.scale.set(scale, scale, scale);
 
-// --------------------------------------------------
-// BOUCLE PRINCIPALE
-// --------------------------------------------------
-function animate() {
-    requestAnimationFrame(animate);
+            // Rotation des anneaux
+            // Si on détruit (integrity < 1), ça tourne très vite façon "panne d'énergie"
+            const chaosSpeed = (1.1 - magicIntegrity) * 10; 
+            
+            runeRing.rotation.z += (0.5 + chaosSpeed) * dt;
+            runeRing2.rotation.z -= (0.3 + chaosSpeed) * dt;
+            squareRing.rotation.z += (0.2 + chaosSpeed) * dt;
 
-    // Cercle magique : construit si main ouverte, détruit si poing
-    const targetIntegrity = handDetected && !isFist ? 1 : 0;
-    magicIntegrity += (targetIntegrity - magicIntegrity) * 0.1;
-    magicGroup.scale.setScalar(magicIntegrity);
-    magicGroup.position.lerp(handPosition, 0.2);
+            // Opacité et couleur
+            // On module l'intensité du bloom
+            bloomPass.strength = 1.5 + (1 - magicIntegrity) * 5; // Flash lumineux quand on détruit
+            
+            // Masquer si intégrité proche de 0
+            magicGroup.visible = magicIntegrity > 0.01;
 
-    // --- RAYON ASTRAL ---
-    if (isPointing) spawnRay();
-    rays.forEach(r => {
-        r.position.z -= 0.6;
-    });
+            composer.render();
+        }
 
-    // --- EXPLOSION PARTICULES (poing + mouvement rapide) ---
-    if (isFist && handVelocity.length() > 0.6) spawnExplosion();
-    particles.forEach(p => {
-        p.position.add(p.velocity.multiplyScalar(0.1));
-        p.material.opacity *= 0.96;
-    });
+        // Redimensionnement
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
 
-    // --- PORTAIL (faire tourner la main rapidement) ---
-    if (handVelocity.length() > 1 && !portal) spawnPortal();
-    if (portal) portal.rotation.z += 0.03;
+        animate();
 
-    // --- PUSH (main ouverte + mouvement avant) ---
-    if (!isFist && handVelocity.y > 0.7) triggerPush();
-    if (pushForce > 0) pushForce -= 0.05;
-
-    composer.render();
-}
-
-animate();
-
-// Resize
-window.addEventListener('resize', () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    composer.setSize(window.innerWidth, window.innerHeight);
-});
-
-</script>
+    </script>
 </body>
 </html>
